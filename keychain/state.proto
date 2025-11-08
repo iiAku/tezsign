@@ -1,0 +1,14 @@
+syntax = "proto3";
+package keychain;
+
+option go_package = "./keychain;keychain";
+
+message KindState {
+  uint64 level = 1;
+  uint32 round = 2;
+}
+
+message KeyState {
+  // Index by SING_KIND numeric value (0x11,0x12,0x13).
+  map<int32, KindState> by_kind = 1;
+}

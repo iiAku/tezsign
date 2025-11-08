@@ -1,0 +1,18 @@
+[Unit]
+Description=Runs tezsign
+After=attach-gadget.service
+
+[Service]
+Type=simple
+User=tezsign
+Group=tezsign
+Environment="DATA_STORE=/data"
+ExecStart=/app/tezsign
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

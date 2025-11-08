@@ -1,0 +1,17 @@
+[Unit]
+Description=Attach gadget to UDC (bind) and fix endpoint perms
+After=setup-gadget-dev.service ffs_registrar.service
+Requires=ffs_registrar.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/udevadm settle --timeout=5
+ExecStart=/usr/local/bin/attach-gadget.sh
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

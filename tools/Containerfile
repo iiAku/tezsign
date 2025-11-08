@@ -1,0 +1,24 @@
+FROM golang:1.25.3-trixie
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    fusefat \
+    fuse2fs \
+    fuse3 \
+    xz-utils \
+    wget \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN export ZIG_VERSION=0.15.2 && \
+	wget https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz && \
+	mkdir -p zig /usr/local/zig && tar --xz -xf zig-x86_64-linux-$ZIG_VERSION.tar.xz --directory zig && \
+	cp -rf zig/zig*/* --target-directory=/usr/local/zig
+
+ENV PATH="/usr/local/go/bin:/usr/local/zig:${PATH}"
+ENV CC="zig cc -target aarch64-linux-musl -O3 -flto"
+ENV CXX="zig c++ -target aarch64-linux-musl -O3 -flto"
+
+WORKDIR /work
+
+CMD ["/bin/bash"]

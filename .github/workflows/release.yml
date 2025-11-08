@@ -1,0 +1,214 @@
+name: "Build Armbian (Parallel)"
+
+on:
+    push:
+
+jobs:
+    build-armbian:
+        runs-on: ubuntu-24.04-arm
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - board: "rpi4b"
+                      artifact_id: "raspberry_pi"
+                      armbian_release: "trixie"
+                    - board: "radxa-zero3"
+                      artifact_id: "radxa_zero3"
+                      armbian_release: "trixie"
+                      armbian_boot_scenario: "binman-atf-mainline"
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v5
+
+            - name: Build base Armbian Image
+              uses: ./.github/template/build-armbian
+              with:
+                  artifact_id: ${{ matrix.artifact_id }}
+                  armbian_token: ${{ secrets.GITHUB_TOKEN }}
+                  armbian_board: ${{ matrix.board }}
+                  armbian_release: ${{ matrix.armbian_release }}
+                  armbian_boot_scenario: ${{ matrix.armbian_boot_scenario || '' }}
+
+    build-gadget:
+        runs-on: ubuntu-latest
+        needs:
+          - build-armbian
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - image_id: "raspberry_pi"
+                      source_artifact: "raspberry_pi"
+                      create_binary_artifact: "true"
+                    - image_id: "radxa_zero3"
+                      source_artifact: "radxa_zero3"
+                      create_binary_artifact: "false"
+        steps:
+            - uses: actions/checkout@v5
+              with:
+                  fetch-depth: 0
+
+            - name: Build ${{ matrix.image_id }} image
+              uses: ./.github/template/amend-image
+              with:
+                image_id: ${{ matrix.image_id }}
+                source_artifact: ${{ matrix.source_artifact }}
+                create_binary_artifact: ${{ matrix.create_binary_artifact }}
+
+    cleanup-artifacts:
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - artifact: "raspberry_pi"
+                    - artifact: "radxa_zero3"
+        needs:
+          - build-gadget
+        steps:
+          - uses: geekyeggo/delete-artifact@v5
+            with:
+                name: ${{ matrix.artifact }}
+
+    build-updater:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v5
+              with:
+                  fetch-depth: 0
+
+            - name: Set up Go
+              uses: actions/setup-go@v4
+              with:
+                go-version: '>=1.25.0'
+
+            - name: Build tezsign updater (Linux aarch64)
+              env:
+                GOOS: linux
+                GOARCH: arm64
+              run: |
+                  go build -ldflags='-s -w -extldflags "-static"' -trimpath -o ../build/tezsign_updater_linux_arm64 ./tools/updater
+            
+            - name: Build tezsign updater (Linux amd64)
+              env:
+                GOOS: linux
+                GOARCH: amd64
+              run: |
+                  go build -ldflags='-s -w -extldflags "-static"' -trimpath -o ../build/tezsign_updater_linux_amd64 ./tools/updater
+
+            - name: Build tezsign updater (macos arm64)
+              env:
+                GOOS: darwin
+                GOARCH: arm64
+              run: |
+                  go build -ldflags='-s -w -extldflags "-static"' -trimpath -o ../build/tezsign_updater_macos_arm64 ./tools/updater
+
+            - name: Upload tezsign_updater artifact
+              uses: actions/upload-artifact@v5
+              with:
+                name: tezsign_updater
+                path: ./build/*
+                retention-days: 1
+
+    build-host-linux-amd64:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v5
+            with:
+                fetch-depth: 0
+                submodules: true
+
+          - uses: ./.github/template/build-host-linux
+            with:
+              toolchain: x86_64-linux-musl
+              artifact-id: tezsign-host-linux-amd64
+              goos: linux
+              goarch: amd64
+              libusb-host: x86_64-linux-musl
+
+    build-host-linux-arm64:
+        runs-on: ubuntu-latest
+        if: github.ref == 'refs/heads/main'
+        steps:
+          - uses: actions/checkout@v5
+            with:
+                fetch-depth: 0
+                submodules: true
+
+          - uses: ./.github/template/build-host-linux
+            with:
+              toolchain: aarch64-linux-musl
+              artifact-id: tezsign-host-linux-arm64
+              goos: linux
+              goarch: arm64
+              libusb-host: aarch64-linux-musl
+
+    build-host-macos-amd64:
+        runs-on: macos-15-intel
+        if: github.ref == 'refs/heads/main'
+        steps:
+          - uses: actions/checkout@v5
+            with:
+                fetch-depth: 0
+                submodules: true
+
+          - name: Install autoconf
+            run: brew install autoconf automake gperf
+
+          - uses: ./.github/template/build-host-macos
+            with:
+              goos: macos
+              goarch: amd64
+              artifact-id: tezsign-host-macos-amd64
+              libusb-host: x86_64-darwin-none
+
+    build-host-macos-arm64:
+        runs-on: macos-latest
+        steps:
+          - uses: actions/checkout@v5
+            with:
+                fetch-depth: 0
+                submodules: true
+          - name: Install autoconf
+            run: brew install autoconf automake gperf
+
+          - uses: ./.github/template/build-host-macos
+            with:
+              goos: macos
+              goarch: arm64
+              artifact-id: tezsign-host-macos-arm64
+              libusb-host: aarch64-darwin-none
+
+    publish:
+        runs-on: ubuntu-latest
+        if: github.ref == 'refs/heads/main'
+        needs: 
+          - build-gadget
+          - cleanup-artifacts # make sure artifacts are cleaned up before publishing
+          - build-host-linux-amd64
+          - build-host-linux-arm64
+          - build-host-macos-amd64
+          - build-host-macos-arm64
+          - build-updater
+        steps:
+          - uses: actions/checkout@v5
+
+          - name: create release dir
+            run: mkdir ./release
+
+          - uses: actions/download-artifact@v5
+            with:
+              path: ./release
+              merge-multiple: true
+
+          - name: Set date
+            run: echo "DATE=$(date +'%Y%m%d%H%M')" >> $GITHUB_ENV
+            
+          - name: publish
+            uses: ncipollo/release-action@v1
+            with:
+              artifacts: ./release/*
+              tag: ${{ format('release-{0}', env.DATE) }}
+              commit: ${{ github.sha }}

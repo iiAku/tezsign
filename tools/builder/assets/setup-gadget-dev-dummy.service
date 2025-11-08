@@ -1,0 +1,11 @@
+[Unit]
+Description=Enable USB ECM Gadget Network (usb0)
+After=setup-gadget.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
