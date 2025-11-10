@@ -30,6 +30,21 @@
 3.  Plug the SD card into your board (e.g., Radxa Zero 3, RPi Zero 2W).
 4.  Connect the board to your host machine.
     * **Important:** Make sure you use a good quality USB cable and connect it to the **OTG port** of your board.
+5.  **(Linux Hosts Only) Add udev rules:**
+    To allow your host machine to communicate with the gadget without root privileges, you need to add a `udev` rule. Create a file named `/etc/udev/rules.d/99-tezsign.rules` with the following content:
+    ```
+    SUBSYSTEM=="usb", ATTR{idVendor}=="9997", ATTR{idProduct}=="0001", ATTR{product}=="tezsign-gadget", GROUP="plugdev", MODE="0660"
+    ```
+    After saving the file, reload the `udev` rules and re-plug your device:
+    ```bash
+    sudo udevadm control --reload-rules && sudo udevadm trigger
+    ```
+    You must also ensure your user is part of the `plugdev` group:
+    ```bash
+    sudo usermod -aG plugdev $USER
+    ```
+    You will need to log out and log back in for this group change to take effect.
+
 
 After the initial connection, the device will configure itself and reboot. This process takes approximately 30 seconds.
 
