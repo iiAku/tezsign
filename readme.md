@@ -31,15 +31,12 @@
 4.  Connect the board to your host machine.
     * **Important:** Make sure you use a good quality USB cable and connect it to the **OTG port** of your board.
 5.  **(Linux Hosts Only) Add udev rules:**
-    To allow your host machine to communicate with the gadget without root privileges, you need to add a `udev` rule. Create a file named `/etc/udev/rules.d/99-tezsign.rules` with the following content:
-    ```
-    SUBSYSTEM=="usb", ATTR{idVendor}=="9997", ATTR{idProduct}=="0001", ATTR{product}=="tezsign-gadget", GROUP="plugdev", MODE="0660"
-    ```
-    After saving the file, reload the `udev` rules and re-plug your device:
+
+    To allow your host machine to communicate with the gadget without root privileges, you need to add a `udev` rule. Run the helper script (it writes `/etc/udev/rules.d/99-tezsign.rules` and reloads `udev`) to install the required rule:
     ```bash
-    sudo udevadm control --reload-rules && sudo udevadm trigger
+    sudo ./tools/add_udev_rules.sh
     ```
-    You must also ensure your user is part of the `plugdev` group:
+    After running the script, make sure your user is part of the `plugdev` group:
     ```bash
     sudo usermod -aG plugdev $USER
     ```

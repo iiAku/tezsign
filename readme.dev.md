@@ -17,34 +17,18 @@ For development and debugging, `tezsign` provides special `dev` flavor images. T
 
 ### Host Machine Setup (Linux)
 
-For your host machine to recognize and configure the USB Ethernet (ECM) gadget, you must create two `udev` rules. This allows your host to automatically assign an IP address to its side of the USB connection, enabling you to reach the `tezsign` gadget.
-
-The gadget's `dev` image is pre-configured with the static IP address `10.10.10.1`. We will configure the host to have `10.10.10.2`.
-
-**1. Create the interface naming rule:**
-
-This rule identifies the `tezsign` gadget by its MAC address and gives it a stable network interface name (`tezsign_dev`).
+For your host machine to recognize and configure the USB Ethernet (ECM) gadget, run the helper script that installs the required `udev` rules. This allows your host to automatically assign an IP address to its side of the USB connection, enabling you to reach the `tezsign` gadget.
 
 ```bash
-# /etc/udev/rules.d/50-usb-gadget.rules
-SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="ae:d3:e6:cd:ff:f3", NAME="tezsign_dev"
+sudo ./tools/add_dev_udev_rules.sh
 ```
 
-**2. Create the network configuration rule:**
+The script writes:
 
-This rule runs when the `tezsign_dev` interface is added. It assigns the IP address `10.10.10.2/24` to the host's side of the connection and brings the interface up.
+* `/etc/udev/rules.d/50-usb-gadget.rules` — assigns the `tezsign_dev` name to the interface with MAC `ae:d3:e6:cd:ff:f3`.
+* `/etc/udev/rules.d/99-usb-network.rules` — configures the host side with `10.10.10.2/24` and brings the interface up.
 
-```bash
-# /etc/udev/rules.d/99-usb-network.rules
-SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="ae:d3:e6:cd:ff:f3", RUN+="/usr/bin/ip addr add 10.10.10.2/24 dev tezsign_dev", RUN+="/usr/bin/ip link set dev tezsign_dev up"
-```
-
-**3. Reload `udev` Rules**
-
-```bash
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-```
+It also reloads the `udev` rules so you do not have to run additional commands manually. (The gadget image is already configured with `10.10.10.1`.)
 
 ### Accessing the Gadget
 
