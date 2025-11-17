@@ -13,7 +13,6 @@ curl
 debconf-utils
 debsums
 dialog
-dosfstools
 figlet
 fping
 gpiod
@@ -29,7 +28,6 @@ ncurses-term
 toilet
 toilet-fonts
 bsdextrautils
-logrotate
 lsof
 man-db
 psmisc
@@ -42,7 +40,6 @@ libtirpc-common
 libtirpc3t64
 libyaml-0-2
 mtd-utils
-usbutils
 sensible-utils
 readline-common
 parted
@@ -52,7 +49,4 @@ apt-utils
 openssh-server
 openssh-sftp-server
 nano
-passwd
-login
-login.defs
 udev
