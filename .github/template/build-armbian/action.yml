@@ -87,7 +87,7 @@ runs:
 
         # disable customize_image.sh in dev builds
         if [[ "${{ inputs.tezsign_flavour }}" == "dev" ]]; then
-          rm build/userpatches/customize_image.sh
+          rm -f build/userpatches/customize-image.sh
         fi
 
         # config/boards/radxa-zero3.csc comment out enable_extension "radxa-aic8800"
