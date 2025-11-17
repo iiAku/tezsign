@@ -55,5 +55,4 @@ nano
 passwd
 login
 login.defs
-sysvinit-utils
 udev
