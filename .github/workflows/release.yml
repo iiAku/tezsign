@@ -57,7 +57,7 @@ jobs:
                       tezsign_flavour: "prod"
                     - image_id: "raspberry_pi"
                       source_artifact: "raspberry_pi_dev"
-                      create_binary_artifact: "true"
+                      create_binary_artifact: "false"
                       tezsign_flavour: "dev"
                     - image_id: "radxa_zero3"
                       source_artifact: "radxa_zero3"
@@ -88,6 +88,8 @@ jobs:
                 include:
                     - artifact: "raspberry_pi"
                     - artifact: "radxa_zero3"
+                    - artifact: "raspberry_pi_dev"
+                    - artifact: "radxa_zero3_dev"
         needs:
           - build-gadget
         steps:
@@ -204,34 +206,34 @@ jobs:
               artifact-id: tezsign-host-macos-arm64
               libusb-host: aarch64-darwin-none
 
-    # publish:
-    #     runs-on: ubuntu-latest
-    #     if: github.ref == 'refs/heads/main'
-    #     needs: 
-    #       - build-gadget
-    #       - cleanup-artifacts # make sure artifacts are cleaned up before publishing
-    #       - build-host-linux-amd64
-    #       - build-host-linux-arm64
-    #       - build-host-macos-amd64
-    #       - build-host-macos-arm64
-    #       - build-updater
-    #     steps:
-    #       - uses: actions/checkout@v5
+    publish:
+        runs-on: ubuntu-latest
+        if: github.ref == 'refs/heads/main'
+        needs: 
+          - build-gadget
+          - cleanup-artifacts # make sure artifacts are cleaned up before publishing
+          - build-host-linux-amd64
+          - build-host-linux-arm64
+          - build-host-macos-amd64
+          - build-host-macos-arm64
+          - build-updater
+        steps:
+          - uses: actions/checkout@v5
 
-    #       - name: create release dir
-    #         run: mkdir ./release
+          - name: create release dir
+            run: mkdir ./release
 
-    #       - uses: actions/download-artifact@v5
-    #         with:
-    #           path: ./release
-    #           merge-multiple: true
+          - uses: actions/download-artifact@v5
+            with:
+              path: ./release
+              merge-multiple: true
 
-    #       - name: Set date
-    #         run: echo "DATE=$(date +'%Y%m%d%H%M')" >> $GITHUB_ENV
+          - name: Set date
+            run: echo "DATE=$(date +'%Y%m%d%H%M')" >> $GITHUB_ENV
             
-    #       - name: publish
-    #         uses: ncipollo/release-action@v1
-    #         with:
-    #           artifacts: ./release/*
-    #           tag: ${{ format('release-{0}', env.DATE) }}
-    #           commit: ${{ github.sha }}
+          - name: publish
+            uses: ncipollo/release-action@v1
+            with:
+              artifacts: ./release/*
+              tag: ${{ format('release-{0}', env.DATE) }}
+              commit: ${{ github.sha }}
