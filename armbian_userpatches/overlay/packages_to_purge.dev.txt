@@ -2,7 +2,6 @@ media-types
 python3
 wireguard-tools
 alsa-utils
-bash-completion
 armbian-config
 bc
 bluez
@@ -13,11 +12,6 @@ curl
 wget
 man-db
 locales
-openssh-client
-openssh-server
-openssh-sftp-server
-nano
-htop
 gpiod
 libperl5.40 
 parted
