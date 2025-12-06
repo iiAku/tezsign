@@ -405,6 +405,44 @@ func cmdStatus() *cli.Command {
 	}
 }
 
+func cmdLogs() *cli.Command {
+	return &cli.Command{
+		Name:  "logs",
+		Usage: "Fetch recent logs from the gadget",
+		Flags: []cli.Flag{
+			&cli.IntFlag{
+				Name:    "limit",
+				Aliases: []string{"n"},
+				Usage:   "Max number of lines (newest last, 0 = gadget default)",
+			},
+		},
+		Action: func(ctx context.Context, c *cli.Command) error {
+			h := mustHost(ctx)
+			b := h.Session.Broker
+
+			limit := c.Int("limit")
+			if limit < 0 {
+				return fmt.Errorf("limit must be >= 0")
+			}
+
+			lines, err := common.ReqLogs(b, limit)
+			if err != nil {
+				return err
+			}
+
+			if !isTTY(os.Stdout) {
+				return json.NewEncoder(os.Stdout).Encode(lines)
+			}
+
+			for _, line := range lines {
+				fmt.Println(line)
+			}
+
+			return nil
+		},
+	}
+}
+
 func cmdUnlockKeys() *cli.Command {
 	return &cli.Command{
 		Name:      "unlock",
