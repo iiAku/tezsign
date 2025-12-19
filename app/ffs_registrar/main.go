@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tez-capital/tezsign/app/gadget/common"
+	"github.com/tez-capital/tezsign/watchdog"
 )
 
 func triggerSoftConnect(l *slog.Logger) error {
@@ -129,6 +131,14 @@ func drainEP0Events(ep0 *os.File, enabled chan<- bool, ready *atomic.Uint32, l *
 func main() {
 	l := slog.Default()
 
+	// Initialize systemd watchdog notifier
+	notifier := watchdog.New()
+	defer func() {
+		if notifier != nil {
+			_ = notifier.Close()
+		}
+	}()
+
 	ep0, err := os.OpenFile(Ep0Path, os.O_RDWR, 0)
 	if err != nil {
 		slog.Error("failed to open ep0", "error", err.Error(), "function", FunctionName, "ffs_root", common.FfsInstanceRoot)
@@ -153,6 +163,17 @@ func main() {
 	go runEnabledWatcher(enabled, common.EnabledSock, l)
 
 	l.Info("FFS registrar online; handling EP0 control & events")
+
+	// Signal to systemd that we're ready (Type=notify)
+	if err := notifier.Ready(); err != nil {
+		l.Warn("failed to signal ready to systemd", slog.Any("err", err))
+	}
+
+	// Start watchdog pinger in background
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopPinger := notifier.StartPinger(ctx)
+	defer stopPinger()
 
 	drainEP0Events(ep0, enabled, &ready, l)
 }

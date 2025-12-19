@@ -2,13 +2,24 @@
 Description=Runs tezsign
 After=attach-gadget.service
 Requires=attach-gadget.service
+# BindsTo ensures tezsign stops when attach-gadget or ffs_registrar stops
+BindsTo=attach-gadget.service ffs_registrar.service
+# PartOf ensures tezsign restarts when ffs_registrar restarts
+PartOf=ffs_registrar.service
 
 [Service]
-Type=simple
+# Type=notify: service signals READY when fully initialized
+# Requires watchdog integration in tezsign code
+Type=notify
+NotifyAccess=main
 User=tezsign
 Group=tezsign
 Environment="DATA_STORE=/data/tezsign"
 ExecStart=/app/tezsign
+
+# Watchdog: kill if no ping in 60s (requires code to send WATCHDOG=1)
+WatchdogSec=60
+WatchdogSignal=SIGKILL
 
 # Restart policy: always restart to ensure resilience
 Restart=always
@@ -22,6 +33,7 @@ StartLimitIntervalSec=0
 # These are upper limits, not reservations
 LimitNOFILE=4096
 LimitNPROC=256
+MemoryMax=256M
 
 # Logging to journal for debugging (can be filtered by unit)
 StandardOutput=journal

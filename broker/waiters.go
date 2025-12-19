@@ -3,9 +3,16 @@ package broker
 import (
 	"maps"
 	"sync"
+	"time"
 )
 
-// waiterMap is a tiny typed wrapper for sync.Map keyed by [16]byte.
+// waiterEntry holds a response channel and its creation time for TTL tracking.
+type waiterEntry struct {
+	ch        chan []byte
+	createdAt time.Time
+}
+
+// waiterMap is a typed wrapper for sync.Map keyed by [16]byte with TTL support.
 type waiterMap struct {
 	sync.Map
 }
@@ -13,7 +20,7 @@ type waiterMap struct {
 func (wm *waiterMap) NewWaiter() ([16]byte, chan []byte) {
 	id := NewMessageID()
 	ch := make(chan []byte, 1)
-	wm.Map.Store(id, ch)
+	wm.Map.Store(id, waiterEntry{ch: ch, createdAt: time.Now()})
 	return id, ch
 }
 
@@ -27,7 +34,25 @@ func (wm *waiterMap) LoadAndDelete(id [16]byte) (chan []byte, bool) {
 		return nil, false
 	}
 
-	return v.(chan []byte), true
+	return v.(waiterEntry).ch, true
+}
+
+// ReapStale removes waiters older than the given TTL.
+// Returns the number of reaped entries.
+func (wm *waiterMap) ReapStale(ttl time.Duration) int {
+	now := time.Now()
+	reaped := 0
+
+	wm.Map.Range(func(key, value any) bool {
+		entry := value.(waiterEntry)
+		if now.Sub(entry.createdAt) > ttl {
+			wm.Map.Delete(key)
+			reaped++
+		}
+		return true
+	})
+
+	return reaped
 }
 
 type requestMap[T any] struct {

@@ -23,8 +23,17 @@ echo "Attached gadget to UDC: ${UDC}"
 ln -sf "/sys/class/udc/${UDC}/soft_connect" "/tmp/soft_connect"
 chown registrar:registrar /tmp/soft_connect # allow ffs_registrar to access it
 
-# Wait for endpoints and fix ownership
+# Wait for endpoints and fix ownership (with 60s timeout)
+ENDPOINT_TIMEOUT=60
 for ep in /dev/ffs/tezsign/ep1 /dev/ffs/tezsign/ep2 /dev/ffs/tezsign/ep3 /dev/ffs/tezsign/ep4; do
-  while [[ ! -e "$ep" ]]; do sleep 1; done
+  count=0
+  while [[ ! -e "$ep" ]]; do
+    sleep 1
+    count=$((count + 1))
+    if [[ $count -ge $ENDPOINT_TIMEOUT ]]; then
+      echo "Timeout (${ENDPOINT_TIMEOUT}s) waiting for endpoint: $ep"
+      exit 1
+    fi
+  done
   chown tezsign:tezsign "$ep"
 done

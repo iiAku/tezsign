@@ -100,23 +100,31 @@ func serveEnabled(ctx context.Context, sockPath string, l *slog.Logger) <-chan s
 }
 
 func runEnabledWatcher(enabled <-chan bool, sockPath string, l *slog.Logger) {
-	var cancel context.CancelFunc
-	var closeCompletedChan <-chan struct{}
-	isEnabled := false
+	type session struct {
+		cancel context.CancelFunc
+		done   <-chan struct{}
+	}
+	var current *session
+
+	defer func() {
+		if current != nil {
+			current.cancel()
+			<-current.done
+		}
+		_ = os.Remove(sockPath)
+	}()
+
 	for en := range enabled {
-		if en && !isEnabled {
-			isEnabled = true
-			var ctx context.Context
-			ctx, cancel = context.WithCancel(context.Background())
-			closeCompletedChan = serveEnabled(ctx, sockPath, l)
-		} else if !en && isEnabled {
-			isEnabled = false
-			if cancel != nil {
-				cancel()
-				cancel = nil
-				<-closeCompletedChan // wait for close
+		if en && current == nil {
+			ctx, cancel := context.WithCancel(context.Background())
+			current = &session{
+				cancel: cancel,
+				done:   serveEnabled(ctx, sockPath, l),
 			}
-			// Clean up socket file
+		} else if !en && current != nil {
+			current.cancel()
+			<-current.done
+			current = nil
 			_ = os.Remove(sockPath)
 		}
 	}

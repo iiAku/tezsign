@@ -4,11 +4,18 @@ After=setup-gadget.service
 Requires=setup-gadget.service
 
 [Service]
-Type=simple
+# Type=notify: service signals READY when fully initialized
+# Requires watchdog integration in ffs_registrar code
+Type=notify
+NotifyAccess=main
 User=registrar
 Group=registrar
 Environment="BROKER_LOG=debug"
 ExecStart=/usr/local/bin/ffs_registrar
+
+# Watchdog: kill if no ping in 60s (requires code to send WATCHDOG=1)
+WatchdogSec=60
+WatchdogSignal=SIGKILL
 
 # Restart policy: always restart to ensure resilience
 Restart=always

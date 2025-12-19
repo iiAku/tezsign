@@ -16,9 +16,11 @@ import (
 
 	"github.com/tez-capital/tezsign/app/gadget/common"
 	"github.com/tez-capital/tezsign/broker"
+	"github.com/tez-capital/tezsign/health"
 	"github.com/tez-capital/tezsign/keychain"
 	"github.com/tez-capital/tezsign/logging"
 	"github.com/tez-capital/tezsign/signer"
+	"github.com/tez-capital/tezsign/watchdog"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -27,9 +29,45 @@ const (
 
 	securedAttemptWindow = 30 * time.Second
 	securedAttemptLimit  = 5
+
+	// Backoff after fatal broker errors to avoid tight restart loops
+	fatalErrorBackoff = 5 * time.Second
+
+	// Handler timeout prevents signing operations from hanging indefinitely
+	handlerTimeout = 30 * time.Second
 )
 
 var securedRPCLimiter = newAttemptLimiter(securedAttemptLimit, securedAttemptWindow)
+
+// isFatalBrokerError returns true if the error indicates a permanent failure
+// that requires a clean restart with backoff, rather than immediate retry.
+func isFatalBrokerError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		switch errno {
+		case syscall.EBADF: // Bad file descriptor - fd closed/invalid
+			return true
+		case syscall.ENOENT: // No such file - endpoint removed
+			return true
+		}
+	}
+
+	return false
+}
+
+// withTimeout wraps a handler with a context timeout to prevent hanging.
+// If the handler doesn't complete within the timeout, a timeout error is returned.
+func withTimeout(h broker.Handler, timeout time.Duration) broker.Handler {
+	return func(ctx context.Context, payload []byte) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return h(ctx, payload)
+	}
+}
 
 func main() {
 	logCfg := logging.NewConfigFromEnv()
@@ -53,7 +91,15 @@ func main() {
 
 	l.Debug("logging to file", "path", logging.CurrentFile())
 
-	if err := run(l); err != nil {
+	// Initialize systemd watchdog notifier (nil if not running under systemd)
+	notifier := watchdog.New()
+	defer func() {
+		if notifier != nil {
+			_ = notifier.Close()
+		}
+	}()
+
+	if err := run(l, notifier); err != nil {
 		l.Error("RUN ERROR", slog.Any("err", err))
 		os.Exit(1)
 	}
@@ -367,7 +413,7 @@ func handleRequestsFactory(fs *keychain.FileStore, kr *keychain.KeyRing, l *slog
 	}
 }
 
-func runBrokers(ctx context.Context, fs *keychain.FileStore, kr *keychain.KeyRing, l *slog.Logger) error {
+func runBrokers(ctx context.Context, fs *keychain.FileStore, kr *keychain.KeyRing, l *slog.Logger, notifier *watchdog.Notifier) error {
 	l.Info("Waiting for endpoints...")
 	in0, out0, in1, out1, err := waitForFunctionFSEndpoints(common.FfsInstanceRoot, waitEndpointsTime)
 	if err != nil {
@@ -423,21 +469,34 @@ func runBrokers(ctx context.Context, fs *keychain.FileStore, kr *keychain.KeyRin
 
 	cleanupSock := serveReadySocket(l)
 	defer cleanupSock()
-	// IF0: sign channel
-	signBroker := broker.New(r0, w0, bLogger, broker.WithHandler(handleSignAndStatus(handleRequestsFactory(fs, kr, l))))
+	// IF0: sign channel (with timeout wrapper to prevent hanging)
+	signBroker := broker.New(r0, w0, bLogger, broker.WithHandler(
+		withTimeout(handleSignAndStatus(handleRequestsFactory(fs, kr, l)), handlerTimeout)))
 	defer signBroker.Stop()
-	// IF1: management channel
-	mgmtBroker := broker.New(r1, w1, bLogger, broker.WithHandler(handleMgmtOnly(handleRequestsFactory(fs, kr, l))))
+	// IF1: management channel (with timeout wrapper to prevent hanging)
+	mgmtBroker := broker.New(r1, w1, bLogger, broker.WithHandler(
+		withTimeout(handleMgmtOnly(handleRequestsFactory(fs, kr, l)), handlerTimeout)))
 	defer mgmtBroker.Stop()
 
 	l.Info("Signer gadget online; awaiting requests.")
+
+	// Signal to systemd that we're ready (Type=notify)
+	if err := notifier.Ready(); err != nil {
+		l.Warn("failed to signal ready to systemd", slog.Any("err", err))
+	}
+
+	// Wait for shutdown or broker failure
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-signBroker.Done():
+		return fmt.Errorf("sign broker exited unexpectedly")
+	case <-mgmtBroker.Done():
+		return fmt.Errorf("management broker exited unexpectedly")
 	}
 }
 
-func run(l *slog.Logger) error {
+func run(l *slog.Logger, notifier *watchdog.Notifier) error {
 	// Keystore directory: DATA_STORE/keystore when DATA_STORE is set; else next to binary
 	var baseDir string
 	if ds := strings.TrimSpace(os.Getenv("DATA_STORE")); ds != "" {
@@ -457,9 +516,19 @@ func run(l *slog.Logger) error {
 
 	kr := keychain.NewKeyRing(l, fs)
 
+	// Initialize health monitor (goroutine limit of 100 for embedded devices)
+	healthMon := health.NewMonitor(100)
+	_ = healthMon // Will be used for health checks in watchdog context
+
 	// Graceful shutdown on SIGTERM/SIGINT
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	// Start watchdog pinger (runs in background, signals WATCHDOG=1 periodically)
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+	stopPinger := notifier.StartPinger(rootCtx)
+	defer stopPinger()
 
 	// Revival loop: wait for enabled socket, run brokers, restart on disable
 	for {
@@ -467,6 +536,7 @@ func run(l *slog.Logger) error {
 		select {
 		case sig := <-sigCh:
 			l.Info("Received shutdown signal", slog.String("signal", sig.String()))
+			_ = notifier.Stopping()
 			return nil
 		default:
 		}
@@ -495,17 +565,21 @@ func run(l *slog.Logger) error {
 				l.Warn("gadget disabled; stopping brokers")
 			case sig := <-sigCh:
 				l.Info("Received shutdown signal during operation", slog.String("signal", sig.String()))
+				_ = notifier.Stopping()
 			}
 			cancel()
 			_ = enabled.Close()
 		}()
 
-		err = runBrokers(ctx, fs, kr, l)
+		err = runBrokers(ctx, fs, kr, l, notifier)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				l.Info("Brokers stopped")
+				l.Info("Brokers stopped (context canceled)")
+			} else if isFatalBrokerError(err) {
+				l.Error("Fatal broker error, restarting with backoff", slog.Any("err", err))
+				time.Sleep(fatalErrorBackoff)
 			} else {
-				l.Error("broker error", "err", err)
+				l.Warn("Transient broker error, retrying", slog.Any("err", err))
 			}
 			continue
 		}

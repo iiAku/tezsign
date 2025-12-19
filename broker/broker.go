@@ -92,6 +92,10 @@ type Broker struct {
 	readLoopDone   <-chan struct{}
 	writerLoopDone <-chan struct{}
 	workersDone    <-chan struct{}
+	reaperDone     <-chan struct{}
+
+	// done closes when any critical loop exits (signals broker is no longer healthy)
+	done chan struct{}
 }
 
 const (
@@ -102,6 +106,17 @@ const (
 	initialBackoff = 10 * time.Millisecond
 	maxBackoff     = 1 * time.Second
 	backoffFactor  = 2
+
+	// Maximum consecutive errors before giving up
+	// This prevents tight exit loops while still allowing recovery from transient issues
+	maxConsecutiveErrors = 10
+
+	// Waiter TTL: clean up waiters that haven't received responses
+	waiterTTL          = 5 * time.Minute
+	waiterReapInterval = 30 * time.Second
+
+	// Stop timeout: maximum time to wait for clean shutdown
+	stopTimeout = 5 * time.Second
 )
 
 func New(r ReadContexter, w WriteContexter, opts ...Option) *Broker {
@@ -140,10 +155,55 @@ func New(r ReadContexter, w WriteContexter, opts ...Option) *Broker {
 		cancel: cancel,
 	}
 
+	b.done = make(chan struct{})
 	b.workersDone = b.startWorkers()
 	b.readLoopDone = b.readLoop()
 	b.writerLoopDone = b.writerLoop()
+	b.reaperDone = b.startReaper()
+
+	// Monitor for loop exits and signal done
+	go func() {
+		select {
+		case <-b.readLoopDone:
+			b.logger.Warn("read loop exited, broker unhealthy")
+		case <-b.writerLoopDone:
+			b.logger.Warn("write loop exited, broker unhealthy")
+		case <-b.ctx.Done():
+			// Normal shutdown, don't signal unhealthy
+			return
+		}
+		close(b.done)
+	}()
+
 	return b
+}
+
+// Done returns a channel that closes when the broker becomes unhealthy
+// (i.e., when a critical loop exits unexpectedly).
+func (b *Broker) Done() <-chan struct{} {
+	return b.done
+}
+
+// startReaper launches a goroutine that periodically cleans up stale waiters.
+func (b *Broker) startReaper() <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(waiterReapInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if reaped := b.waiters.ReapStale(waiterTTL); reaped > 0 {
+					b.logger.Debug("reaped stale waiters", slog.Int("count", reaped))
+				}
+			case <-b.ctx.Done():
+				return
+			}
+		}
+	}()
+	return done
 }
 
 // startWorkers launches a fixed pool of worker goroutines
@@ -269,6 +329,7 @@ func (b *Broker) writerLoop() <-chan struct{} {
 	go func() {
 		defer close(done)
 		backoff := initialBackoff
+		consecutiveErrors := 0
 
 		for {
 			var data []byte
@@ -286,62 +347,33 @@ func (b *Broker) writerLoop() <-chan struct{} {
 				}
 
 				if _, err := b.w.WriteContext(b.ctx, data); err != nil {
-					if isRetryable(err) {
-						b.logger.Debug("write retryable error, backing off", slog.Any("err", err), slog.Duration("backoff", backoff))
+					consecutiveErrors++
 
-						// Exponential backoff with context check
-						select {
-						case <-time.After(backoff):
-						case <-b.ctx.Done():
-							return
-						}
-
-						backoff *= backoffFactor
-						if backoff > maxBackoff {
-							backoff = maxBackoff
-						}
-						continue
+					// Check if we've hit the error limit
+					if consecutiveErrors >= maxConsecutiveErrors {
+						b.logger.Error("write loop: too many consecutive errors, exiting",
+							slog.Int("errors", consecutiveErrors),
+							slog.Any("lastErr", err))
+						return
 					}
-					b.logger.Error("write loop exit", slog.Any("err", err))
-					return
-				}
-				// Success - reset backoff
-				backoff = initialBackoff
-				break
-			}
-		}
-	}()
-	return done
-}
 
-func (b *Broker) readLoop() <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		var buf [DEFAULT_READ_BUFFER]byte
-		backoff := initialBackoff
+					// Check for fatal errors that should exit immediately
+					if isFatal(err) {
+						b.logger.Error("write loop: fatal error, exiting", slog.Any("err", err))
+						return
+					}
 
-		for {
-			select {
-			case <-b.ctx.Done():
-				return
-			default:
-			}
+					// Context cancellation means shutdown
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						b.logger.Debug("write loop: context done", slog.Any("err", err))
+						return
+					}
 
-			n, err := b.r.ReadContext(b.ctx, buf[:])
-			if n > 0 {
-				b.stash.Write(buf[:n])
-				clear(buf[:n]) // clear buffer after we used it
-				b.processStash()
-				// Reset backoff on successful read
-				backoff = initialBackoff
-			}
-
-			if err != nil {
-				if isRetryable(err) {
-					// send retry packet
-					b.writeFrame(b.ctx, payloadTypeRetry, [16]byte{}, nil)
-					b.logger.Debug("read retryable error, backing off", slog.Any("err", err), slog.Duration("backoff", backoff))
+					// All other errors: retry with backoff
+					b.logger.Debug("write error, backing off",
+						slog.Any("err", err),
+						slog.Duration("backoff", backoff),
+						slog.Int("consecutiveErrors", consecutiveErrors))
 
 					// Exponential backoff with context check
 					select {
@@ -356,8 +388,83 @@ func (b *Broker) readLoop() <-chan struct{} {
 					}
 					continue
 				}
-				b.logger.Debug("read loop exit", slog.Any("err", err))
+				// Success - reset backoff and error count
+				backoff = initialBackoff
+				consecutiveErrors = 0
+				break
+			}
+		}
+	}()
+	return done
+}
+
+func (b *Broker) readLoop() <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var buf [DEFAULT_READ_BUFFER]byte
+		backoff := initialBackoff
+		consecutiveErrors := 0
+
+		for {
+			select {
+			case <-b.ctx.Done():
 				return
+			default:
+			}
+
+			n, err := b.r.ReadContext(b.ctx, buf[:])
+			if n > 0 {
+				b.stash.Write(buf[:n])
+				clear(buf[:n]) // clear buffer after we used it
+				b.processStash()
+				// Reset backoff and error count on successful read
+				backoff = initialBackoff
+				consecutiveErrors = 0
+			}
+
+			if err != nil {
+				consecutiveErrors++
+
+				// Check if we've hit the error limit
+				if consecutiveErrors >= maxConsecutiveErrors {
+					b.logger.Error("read loop: too many consecutive errors, exiting",
+						slog.Int("errors", consecutiveErrors),
+						slog.Any("lastErr", err))
+					return
+				}
+
+				// Check for fatal errors that should exit immediately
+				if isFatal(err) {
+					b.logger.Error("read loop: fatal error, exiting", slog.Any("err", err))
+					return
+				}
+
+				// Context cancellation means shutdown
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					b.logger.Debug("read loop: context done", slog.Any("err", err))
+					return
+				}
+
+				// All other errors: retry with backoff
+				b.writeFrame(b.ctx, payloadTypeRetry, [16]byte{}, nil)
+				b.logger.Debug("read error, backing off",
+					slog.Any("err", err),
+					slog.Duration("backoff", backoff),
+					slog.Int("consecutiveErrors", consecutiveErrors))
+
+				// Exponential backoff with context check
+				select {
+				case <-time.After(backoff):
+				case <-b.ctx.Done():
+					return
+				}
+
+				backoff *= backoffFactor
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+				continue
 			}
 		}
 	}()
@@ -426,33 +533,65 @@ func (b *Broker) writeFrame(ctx context.Context, msgType payloadType, id [16]byt
 
 func (b *Broker) Stop() {
 	b.cancel()
-	<-b.readLoopDone
-	<-b.writerLoopDone
-	close(b.workChan)
-	<-b.workersDone
+
+	// Wait for all goroutines with timeout to prevent hanging
+	done := make(chan struct{})
+	go func() {
+		<-b.readLoopDone
+		<-b.writerLoopDone
+		<-b.reaperDone
+		close(b.workChan)
+		<-b.workersDone
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Clean shutdown
+	case <-time.After(stopTimeout):
+		b.logger.Warn("broker stop timed out, forcing shutdown")
+	}
 }
 
+// isFatal returns true only for errors that indicate the endpoint is permanently broken
+// and cannot recover. For USB gadgets, most errors are transient and should be retried.
+func isFatal(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		switch errno {
+		case syscall.EBADF: // Bad file descriptor - fd is closed/invalid
+			return true
+		case syscall.ENOENT: // No such file or directory - endpoint removed
+			return true
+		}
+	}
+
+	return false
+}
+
+// isRetryable returns true if the error is likely transient and the operation should be retried.
+// For USB gadgets, we retry on almost all errors except truly fatal ones (EBADF, ENOENT).
+// This is intentionally permissive because USB endpoints can produce many different error
+// types during normal operation (disconnect/reconnect, suspend/resume, host resets, etc.).
 func isRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	// USB endpoints can bounce during (re)bind, host opens, etc.
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
+
+	// Context cancellation is not retryable - it means we're shutting down
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
 	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
-		switch errno {
-		case syscall.EAGAIN,
-			syscall.EINTR,
-			syscall.EIO,
-			syscall.ENODEV,
-			syscall.EPROTO,
-			syscall.ESHUTDOWN,
-			syscall.EBADMSG,
-			syscall.ETIMEDOUT:
-			return true
-		}
+
+	// Fatal errors are not retryable
+	if isFatal(err) {
+		return false
 	}
-	return false
+
+	// Everything else is retryable (USB gadgets can produce many transient error types)
+	return true
 }
