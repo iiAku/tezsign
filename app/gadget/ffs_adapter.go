@@ -4,9 +4,21 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
+
+// Instrumentation: track leaked goroutines from context cancellation
+var (
+	leakedReaders atomic.Int64
+	leakedWriters atomic.Int64
+)
+
+// GetLeakStats returns the current count of leaked reader and writer goroutines
+func GetLeakStats() (readers, writers int64) {
+	return leakedReaders.Load(), leakedWriters.Load()
+}
 
 type result struct {
 	n   int
@@ -42,6 +54,7 @@ func (r *Reader) ReadContext(ctx context.Context, p []byte) (int, error) {
 
 	select {
 	case <-ctx.Done():
+		leakedReaders.Add(1) // Instrumentation: goroutine is now leaked
 		return 0, ctx.Err()
 	case res := <-readChan:
 		if errors.Is(res.err, os.ErrDeadlineExceeded) {
@@ -70,6 +83,7 @@ func (w *Writer) WriteContext(ctx context.Context, p []byte) (int, error) {
 
 	select {
 	case <-ctx.Done():
+		leakedWriters.Add(1) // Instrumentation: goroutine is now leaked
 		return 0, ctx.Err()
 	case res := <-writeChan:
 		if errors.Is(res.err, os.ErrDeadlineExceeded) {
