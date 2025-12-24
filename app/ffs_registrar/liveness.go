@@ -72,20 +72,31 @@ func serveEnabled(ctx context.Context, sockPath string, l *slog.Logger) <-chan s
 }
 
 func runEnabledWatcher(enabled <-chan bool, sockPath string, l *slog.Logger) {
-	var cancel context.CancelFunc
+	var activeCancel context.CancelFunc
 	var closeCompletedChan <-chan struct{}
 	isEnabled := false
+
+	// stopServer cancels the current server and waits for cleanup
+	stopServer := func() {
+		if activeCancel != nil {
+			activeCancel()
+			activeCancel = nil
+			if closeCompletedChan != nil {
+				<-closeCompletedChan
+			}
+		}
+	}
+	defer stopServer()
+
 	for en := range enabled {
 		if en && !isEnabled {
 			isEnabled = true
-			ctx := context.Background()
+			ctx, cancel := context.WithCancel(context.Background())
+			activeCancel = cancel
 			closeCompletedChan = serveEnabled(ctx, sockPath, l)
 		} else if !en && isEnabled {
-			if cancel != nil {
-				cancel()
-				cancel = nil
-				<-closeCompletedChan // wait for close
-			}
+			isEnabled = false
+			stopServer()
 		}
 	}
 }

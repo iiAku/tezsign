@@ -458,6 +458,18 @@ func run(l *slog.Logger) error {
 
 	// --- broker handler: parse → validate → sign/deny → respond ---
 
+	// Instrumentation: periodically log leaked goroutine counts
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			readers, writers := GetLeakStats()
+			if readers > 0 || writers > 0 {
+				l.Warn("ffs_adapter leaked goroutines", slog.Int64("readers", readers), slog.Int64("writers", writers))
+			}
+		}
+	}()
+
 	for {
 		enabled, err := net.Dial("unix", common.EnabledSock)
 		if err != nil {
@@ -468,14 +480,19 @@ func run(l *slog.Logger) error {
 		l.Info("gadget enabled; starting brokers")
 
 		ctx, cancel := context.WithCancel(context.Background())
+		ioCopyDone := make(chan struct{})
 		go func() {
+			defer close(ioCopyDone)
 			_, _ = io.Copy(io.Discard, enabled)
 			l.Warn("gadget disabled; stopping brokers")
 			cancel()
-			_ = enabled.Close()
 		}()
 
 		err = runBrokers(ctx, fs, kr, l)
+		// Cleanup: ensure socket is closed and goroutine exits before retrying
+		cancel()
+		_ = enabled.Close() // Force close to unblock io.Copy
+		<-ioCopyDone        // Wait for io.Copy goroutine to exit
 		if err != nil {
 			l.Error("broker error", "err", err)
 			continue

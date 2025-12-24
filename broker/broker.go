@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/tez-capital/tezsign/logging"
 )
@@ -147,6 +148,8 @@ func (b *Broker) Request(ctx context.Context, payload []byte) ([]byte, [16]byte,
 	}
 }
 
+const maxWriteRetries = 10
+
 func (b *Broker) writerLoop() <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
@@ -158,16 +161,21 @@ func (b *Broker) writerLoop() <-chan struct{} {
 			case <-b.ctx.Done():
 				return
 			}
-			for {
+			success := false
+			for retries := 0; retries < maxWriteRetries; retries++ {
 				if _, err := b.w.WriteContext(b.ctx, data); err != nil {
 					if isRetryable(err) {
-						b.logger.Debug("write retryable error", slog.Any("err", err))
+						b.logger.Debug("write retryable error", slog.Any("err", err), slog.Int("retry", retries+1))
 						continue
 					}
 					b.logger.Error("write loop exit", slog.Any("err", err))
 					return
 				}
+				success = true
 				break
+			}
+			if !success {
+				b.logger.Error("write exhausted retries", slog.Int("maxRetries", maxWriteRetries))
 			}
 		}
 	}()
@@ -223,7 +231,14 @@ func (b *Broker) processStash() {
 			case payloadTypeResponse:
 				b.logger.Debug("rx resp", slog.String("id", fmt.Sprintf("%x", id)), slog.Int("size", len(payload)))
 				if ch, ok := b.waiters.LoadAndDelete(id); ok && ch != nil {
-					ch <- payload
+					select {
+					case ch <- payload:
+						// sent successfully
+					case <-time.After(5 * time.Second):
+						b.logger.Warn("response send timeout; waiter may have timed out", slog.String("id", fmt.Sprintf("%x", id)))
+					case <-b.ctx.Done():
+						// broker shutting down
+					}
 				}
 			case payloadTypeRequest:
 				b.logger.Debug("rx req", slog.String("id", fmt.Sprintf("%x", id)), slog.Int("size", len(payload)))
